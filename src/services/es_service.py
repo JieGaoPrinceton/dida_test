@@ -77,31 +77,35 @@ KNOWLEDGE_INDEX_SETTINGS = {
 
 
 async def ensure_indices():
-    for index_name, body in [
+    for index_name, index_settings in [
         (settings.es_email_index, EMAIL_INDEX_SETTINGS),
         (settings.es_knowledge_index, KNOWLEDGE_INDEX_SETTINGS),
     ]:
         if not await es_client.indices.exists(index=index_name):
-            await es_client.indices.create(index=index_name, body=body)
+            await es_client.indices.create(
+                index=index_name,
+                settings=index_settings["settings"],
+                mappings=index_settings["mappings"],
+            )
 
 
 async def bulk_index_emails(docs: list[dict]) -> dict:
-    actions = []
+    operations: list[dict] = []
     for doc in docs:
-        actions.append({"index": {"_index": settings.es_email_index}})
-        actions.append(doc)
-    if actions:
-        return await es_client.bulk(body=actions, refresh="wait_for")
+        operations.append({"index": {"_index": settings.es_email_index}})
+        operations.append(doc)
+    if operations:
+        return await es_client.bulk(operations=operations, refresh="wait_for")
     return {}
 
 
 async def bulk_index_knowledge(docs: list[dict]) -> dict:
-    actions = []
+    operations: list[dict] = []
     for doc in docs:
-        actions.append({"index": {"_index": settings.es_knowledge_index}})
-        actions.append(doc)
-    if actions:
-        return await es_client.bulk(body=actions, refresh="wait_for")
+        operations.append({"index": {"_index": settings.es_knowledge_index}})
+        operations.append(doc)
+    if operations:
+        return await es_client.bulk(operations=operations, refresh="wait_for")
     return {}
 
 
@@ -121,12 +125,13 @@ async def search_emails_bm25(
             }
         }
     ]
-    body: dict[str, Any] = {
-        "query": {"bool": {"must": must, "filter": _build_filters(category, tags)}},
-        "size": top_n,
-        "_source": ["email_id", "subject", "body_text", "category", "tags", "quality_score"],
-    }
-    resp = await es_client.search(index=settings.es_email_index, body=body)
+    q: dict[str, Any] = {"bool": {"must": must, "filter": _build_filters(category, tags)}}
+    resp = await es_client.search(
+        index=settings.es_email_index,
+        query=q,
+        size=top_n,
+        source=["email_id", "subject", "body_text", "category", "tags", "quality_score"],
+    )
     return _extract_hits(resp)
 
 
@@ -146,14 +151,13 @@ async def search_knowledge_bm25(
             }
         }
     ]
-    body: dict[str, Any] = {
-        "query": {"bool": {"must": must, "filter": _build_filters(category, tags)}},
-        "size": top_n,
-        "_source": [
-            "knowledge_id", "question", "answer", "category", "tags", "quality_score",
-        ],
-    }
-    resp = await es_client.search(index=settings.es_knowledge_index, body=body)
+    q: dict[str, Any] = {"bool": {"must": must, "filter": _build_filters(category, tags)}}
+    resp = await es_client.search(
+        index=settings.es_knowledge_index,
+        query=q,
+        size=top_n,
+        source=["knowledge_id", "question", "answer", "category", "tags", "quality_score"],
+    )
     return _extract_hits(resp)
 
 
@@ -163,41 +167,40 @@ async def search_by_category(
     top_n: int | None = None,
 ) -> list[dict]:
     top_n = top_n or settings.search_category_top_n
-    body: dict[str, Any] = {
-        "query": {
-            "bool": {
-                "must": [
-                    {
-                        "multi_match": {
-                            "query": query,
-                            "fields": [
-                                "subject^3", "subject.en^2", "body_text", "body_text.en",
-                            ],
-                        }
+    q: dict[str, Any] = {
+        "bool": {
+            "must": [
+                {
+                    "multi_match": {
+                        "query": query,
+                        "fields": ["subject^3", "subject.en^2", "body_text", "body_text.en"],
                     }
-                ],
-                "filter": [{"term": {"category": category}}],
-            }
-        },
-        "size": top_n,
-        "_source": ["email_id", "subject", "body_text", "category", "tags", "quality_score"],
+                }
+            ],
+            "filter": [{"term": {"category": category}}],
+        }
     }
-    resp = await es_client.search(index=settings.es_email_index, body=body)
+    resp = await es_client.search(
+        index=settings.es_email_index,
+        query=q,
+        size=top_n,
+        source=["email_id", "subject", "body_text", "category", "tags", "quality_score"],
+    )
     return _extract_hits(resp)
 
 
 async def suggest(prefix: str, limit: int = 10) -> list[str]:
     suggestions: set[str] = set()
     for index_name in [settings.es_email_index, settings.es_knowledge_index]:
-        body = {
-            "suggest": {
+        resp = await es_client.search(
+            index=index_name,
+            suggest={
                 "kb-suggest": {
                     "prefix": prefix,
                     "completion": {"field": "suggest", "size": limit},
                 }
-            }
-        }
-        resp = await es_client.search(index=index_name, body=body)
+            },
+        )
         for option in (
             resp.get("suggest", {}).get("kb-suggest", [{}])[0].get("options", [])
         ):
